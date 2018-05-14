@@ -1,0 +1,131 @@
+# This template is meant to be deployed in multiple AWS accounts to send CloudTrail logs to a
+# central security account. It should be deployed in the security account as well to log itself.
+# The security-account.yaml template should be deployed in the security account before this template
+# is deployed.
+# - It turns on CloudTrail and sends the logs to a central security account.
+# - It creates a bucket and policy to store CloudTrail logs in the local account too so that they
+#   can be viewed or monitored locally if needed. In addition to S3, they are stored in a CloudWatch
+#   log group.
+# Note that each account into which this template is deployed should be added to the mappings section
+# below in order to ensure consistent naming conventions. The security-account.yaml template also needs
+# to be updated in order to allow each account to send logs to it.
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Cross-account CloudTrail logging to a central security account.
+Parameters:
+  SecurityAccountCloudTrailBucketName:
+    Description: The name of the S3 bucket that already exists in the security account
+      that will be sent CloudTrail logs from this account.
+    Type: String
+    Default: '[security-account-alias]-central-cloudtrail-logs'
+Mappings:
+  # update with account numbers and aliases for each account involved
+  AccountAliases:
+    '123456789012':
+      Alias: company-security
+    '123456789012':
+      Alias: company-dev
+    '123456789012':
+      Alias: company-test
+    '123456789012':
+      Alias: company-stage
+    '123456789012':
+      Alias: company-prod
+Resources:
+  SecurityAccountCloudTrail:
+    Type: AWS::CloudTrail::Trail
+    Properties:
+      TrailName: SecurityAccountCloudTrail
+      EnableLogFileValidation: true
+      IncludeGlobalServiceEvents: true
+      IsLogging: true
+      IsMultiRegionTrail: true
+      S3BucketName: !Ref SecurityAccountCloudTrailBucketName
+      S3KeyPrefix: CloudTrail
+  LocalAccountCloudTrail:
+    Type: AWS::CloudTrail::Trail
+    DependsOn: LocalAccountCloudTrailBucketPolicy
+    Properties:
+      TrailName: LocalAccountCloudTrail
+      EnableLogFileValidation: true
+      IncludeGlobalServiceEvents: true
+      IsLogging: true
+      IsMultiRegionTrail: true
+      S3BucketName: !Join ['-', [!FindInMap [AccountAliases, !Ref 'AWS::AccountId', Alias], cloudtrail]]
+      S3KeyPrefix: CloudTrail
+      CloudWatchLogsLogGroupArn: !GetAtt LocalAccountCloudWatchLogsLogGroup.Arn
+      CloudWatchLogsRoleArn: !GetAtt LocalAccountCloudWatchLogsRole.Arn
+  LocalAccountCloudTrailBucket:
+    Type: AWS::S3::Bucket
+    # keep the bucket if the stack gets deleted
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Join ['-', [!FindInMap [AccountAliases, !Ref 'AWS::AccountId', Alias], cloudtrail]]
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+        # The CloudTrail logs stored locally in this account in S3 (a copy of what is also
+        # sent to the security account) will automatically be deleted after 90 days.
+        - ExpirationInDays: 90
+          Prefix: CloudTrail
+          Status: Enabled
+  LocalAccountCloudTrailBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    DependsOn: LocalAccountCloudTrailBucket
+    Properties:
+      Bucket: !Join ['-', [!FindInMap [AccountAliases, !Ref 'AWS::AccountId', Alias], cloudtrail]]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Sid: CloudTrailAclCheck
+          Effect: Allow
+          Principal:
+            Service: cloudtrail.amazonaws.com
+          Action: 's3:GetBucketAcl'
+          Resource: !Join ['', ['arn:aws:s3:::', !Join ['-', [!FindInMap [AccountAliases, !Ref 'AWS::AccountId', Alias], cloudtrail]]]]
+        - Sid: CloudTrailWrite
+          Effect: Allow
+          Principal:
+            Service: cloudtrail.amazonaws.com
+          Action: 's3:PutObject'
+          Resource:
+          - !Join ['', ['arn:aws:s3:::', !Join ['-', [!FindInMap [AccountAliases, !Ref 'AWS::AccountId', Alias], cloudtrail]],
+              /CloudTrail/AWSLogs/, !Ref 'AWS::AccountId', /*]]
+          Condition:
+            StringEquals:
+              s3:x-amz-acl: 'bucket-owner-full-control'
+  LocalAccountCloudWatchLogsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: CloudTrail
+      # The CloudTrail logs stored locally in this account in CloudWatch logs (a copy
+      # of what is also sent to the security account) will automatically be deleted after 7 days.
+      RetentionInDays: 7
+  LocalAccountCloudWatchLogsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: CloudWatchLogsRoleForCloudTrail
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: cloudtrail.amazonaws.com
+          Action: 'sts:AssumeRole'
+      Policies:
+      - PolicyName: SendToCloudWatchLogs
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Sid: AWSCloudTrailCreateLogStream2014110
+            Effect: Allow
+            Action: 'logs:CreateLogStream'
+            Resource:
+            - !Join ['', ['arn:aws:logs:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId',
+                ':log-group:', !Ref LocalAccountCloudWatchLogsLogGroup, ':log-stream:*']]
+          - Sid: AWSCloudTrailPutLogEvents20141101
+            Effect: Allow
+            Action: 'logs:PutLogEvents'
+            Resource:
+            - !Join ['', ['arn:aws:logs:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId',
+                ':log-group:', !Ref LocalAccountCloudWatchLogsLogGroup, ':log-stream:*']]

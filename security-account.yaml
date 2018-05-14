@@ -1,0 +1,68 @@
+# This template sets up a security/audit/logs account to receive CloudTrail logs from other accounts and itself.
+# It should be deployed before the every-account.yaml template.
+# - It creates an S3 bucket and policy to store CloudTrail logs received from other AWS accounts and itself.
+# - It creates a bucket to store access logs for that bucket.
+# Note that the bucket policy below will need to be updated to include the list of accounts that will be sending
+# their logs. They will also need to be added to the mappings section of the every-account.yaml template.
+# Note also that this only needs to be deployed once in the security account despite the number of regions being used.
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Security Account setup for cross-account CloudTrail logs.
+Parameters:
+  CloudTrailBucketName:
+    Description: The name of the S3 bucket that will be created in this security account
+      to store the CloudTrail logs sent from other accounts.
+    Type: String
+    Default: '[account-alias]-central-cloudtrail-logs'
+  AccessLogsBucketName:
+    Description: The name of the S3 bucket that will be created in this security account
+      to store access logs for the CloudTrail bucket.
+    Type: String
+    Default: '[account-alias]-central-cloudtrail-access-logs'
+Resources:
+  CloudTrailBucket:
+    Type: AWS::S3::Bucket
+    # keep the bucket if the stack gets deleted
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Ref CloudTrailBucketName
+      VersioningConfiguration:
+        Status: Enabled
+      LoggingConfiguration:
+        DestinationBucketName: !Ref AccessLogsBucket
+  CloudTrailBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CloudTrailBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Sid: CloudTrailAclCheck
+          Effect: Allow
+          Principal:
+            Service: cloudtrail.amazonaws.com
+          Action: 's3:GetBucketAcl'
+          Resource: !Join ['', ['arn:aws:s3:::', !Ref CloudTrailBucket]]
+        - Sid: CloudTrailWrite
+          Effect: Allow
+          Principal:
+            Service: cloudtrail.amazonaws.com
+          Action: 's3:PutObject'
+          Resource:
+          - !Join ['', ['arn:aws:s3:::', !Ref CloudTrailBucket, /CloudTrail/AWSLogs/, !Ref 'AWS::AccountId', /*]] # this account (security/audit/logs)
+          # update with account numbers for each account that will be sending CloudTrail logs
+          - !Join ['', ['arn:aws:s3:::', !Ref CloudTrailBucket, /CloudTrail/AWSLogs/, 123456789012, /*]] # dev account
+          - !Join ['', ['arn:aws:s3:::', !Ref CloudTrailBucket, /CloudTrail/AWSLogs/, 123456789012, /*]] # test account
+          - !Join ['', ['arn:aws:s3:::', !Ref CloudTrailBucket, /CloudTrail/AWSLogs/, 123456789012, /*]] # stage account
+          - !Join ['', ['arn:aws:s3:::', !Ref CloudTrailBucket, /CloudTrail/AWSLogs/, 123456789012, /*]] # prod account
+          Condition:
+            StringEquals:
+              s3:x-amz-acl: 'bucket-owner-full-control'
+  AccessLogsBucket:
+    Type: 'AWS::S3::Bucket'
+    # keep the bucket if the stack gets deleted
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Ref AccessLogsBucketName
+      VersioningConfiguration:
+        Status: Enabled
+      AccessControl: LogDeliveryWrite
